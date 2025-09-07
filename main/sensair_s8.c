@@ -12,8 +12,8 @@ char FWreq[] = {0xFE, 0x04, 0x00, 0x1C, 0x00, 0x01, 0xE4, 0x03};    // Readout F
 char ID_Hi[] = {0xFE, 0x04, 0x00, 0x1D, 0x00, 0x01, 0xB5, 0xC3};    // Sensor ID hi    
 char ID_Lo[] = {0xFE, 0x04, 0x00, 0x1E, 0x00, 0x01, 0x45, 0xC3};    // Sensor ID lo    // in Hex 071dbfe4
 
-#define TXD_PIN (GPIO_NUM_5)
-#define RXD_PIN (GPIO_NUM_4)
+#define TXD_PIN (GPIO_NUM_1)
+#define RXD_PIN (GPIO_NUM_2)
 
 void uart_init(void) {
     const uart_config_t uart_config = {

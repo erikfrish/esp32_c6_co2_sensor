@@ -11,9 +11,11 @@
 #define OTA_UPGRADE_FILE_VERSION        0x01010101                            /* The attribute indicates the file version of the running firmware image on the device */
 #define OTA_UPGRADE_HW_VERSION          0x0101                                /* The parameter indicates the version of hardware */
 #define OTA_UPGRADE_MAX_DATA_SIZE       64                                    /* The parameter indicates the maximum data size of query block image */
-#define MANUFACTURER_NAME               "Lmahmutov"
+#define MANUFACTURER_NAME               "erikfrish"
 #define MODEL_NAME                      "Air Sensor 1.0"
 #define FIRMWARE_VERSION                "ver-0.1"
+#define SDA_IO_NUM                      GPIO_NUM_22                           /* GPIO number used for I2C data */
+#define SCL_IO_NUM                      GPIO_NUM_23                           /* GPIO number used for I2C clock */
 
 #define ESP_ZB_ZR_CONFIG()                                                              \
     {                                                                                   \

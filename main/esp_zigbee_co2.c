@@ -8,7 +8,7 @@
 #include "freertos/task.h"
 #include "zcl/esp_zigbee_zcl_common.h"
 #include "sensair_s8.h"
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 #include "bmx280.h"
 #include "ssd1306.h"
 #include "zigbee_logo.h"
@@ -20,9 +20,9 @@
 #include <sys/time.h>
 #include "ha/esp_zigbee_ha_standard.h"
 
-/*------ Clobal definitions -----------*/
+/*------ Global definitions -----------*/
 static char manufacturer[16], model[16], firmware_version[16];
-bool time_updated = false, connected = false, DEMO_MODE = true; /*< DEMO_MDE disable all real sensors and send fake data*/
+bool time_updated = false, connected = false, DEMO_MODE = false; /*< DEMO_MDE disable all real sensors and send fake data*/
 int lcd_timeout = 30;
 uint8_t screen_number = 0; 
 uint16_t temperature = 0, humidity = 0, pressure = 0, CO2_value = 0;
@@ -92,8 +92,8 @@ esp_err_t i2c_master_init()
         
 	i2c_config_t i2c_config = {
 		.mode = I2C_MODE_MASTER,
-		.sda_io_num = GPIO_NUM_6,
-		.scl_io_num = GPIO_NUM_7,
+		.sda_io_num = SDA_IO_NUM,
+		.scl_io_num = SCL_IO_NUM,
 		.sda_pullup_en = GPIO_PULLUP_ENABLE,
 		.scl_pullup_en = GPIO_PULLUP_ENABLE,
 		.master.clk_speed = 1000000
