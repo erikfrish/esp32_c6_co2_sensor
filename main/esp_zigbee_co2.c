@@ -2,7 +2,10 @@
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_partition.h"
 #include "nvs_flash.h"
+#include "nvs.h"
+#include <math.h>
 #include "string.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -25,7 +28,9 @@ static char manufacturer[16], model[16], firmware_version[16];
 bool time_updated = false, connected = false, DEMO_MODE = false; /*< DEMO_MODE disable all real sensors and send fake data*/
 int lcd_timeout = 30;
 uint8_t screen_number = 0; 
-uint16_t temperature = 0, humidity = 0, pressure = 0, CO2_value = 0;
+int16_t temperature = 0, pressure = 0;
+uint16_t humidity = 0, CO2_value = 0;
+static float co2_measured_value = ESP_ZB_ZCL_CARBON_DIOXIDE_MEASUREMENT_MEASURED_VALUE_DEFAULT;
 float temp = 0, pres = 0, hum = 0;
 bool data_ready = false;
 bool lcd_on = true;
@@ -33,6 +38,81 @@ char strftime_buf[64];
 static ssd1306_handle_t ssd1306_dev = NULL;
 SemaphoreHandle_t i2c_semaphore = NULL;
 static const char *TAG = "ESP_HA_CO2_SENSOR";
+
+static esp_err_t erase_data_partition(const char *partition_label)
+{
+    const esp_partition_t *partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, partition_label);
+    if (!partition) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    ESP_RETURN_ON_ERROR(esp_partition_erase_range(partition, 0, partition->size), TAG, "Failed to erase partition %s", partition_label);
+    return ESP_OK;
+}
+
+static void log_measurement_attr_state(const char *label, uint16_t cluster_id, uint16_t attr_id)
+{
+    esp_zb_zcl_attr_t *attr = esp_zb_zcl_get_attribute(SENSOR_ENDPOINT, cluster_id, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, attr_id);
+    if (!attr || !attr->data_p) {
+        ESP_LOGW(TAG, "%s attr not found: cluster=0x%04x attr=0x%04x", label, cluster_id, attr_id);
+        return;
+    }
+
+    switch (attr->type) {
+    case ESP_ZB_ZCL_ATTR_TYPE_S16:
+        ESP_LOGI(TAG, "%s attr state: cluster=0x%04x attr=0x%04x type=0x%02x value=%d", label, cluster_id, attr_id, attr->type, *(int16_t *)attr->data_p);
+        break;
+    case ESP_ZB_ZCL_ATTR_TYPE_U16:
+        ESP_LOGI(TAG, "%s attr state: cluster=0x%04x attr=0x%04x type=0x%02x value=%u", label, cluster_id, attr_id, attr->type, *(uint16_t *)attr->data_p);
+        break;
+    case ESP_ZB_ZCL_ATTR_TYPE_SINGLE:
+        ESP_LOGI(TAG, "%s attr state: cluster=0x%04x attr=0x%04x type=0x%02x value=%f", label, cluster_id, attr_id, attr->type, *(float *)attr->data_p);
+        break;
+    default:
+        ESP_LOGI(TAG, "%s attr state: cluster=0x%04x attr=0x%04x type=0x%02x raw_ptr=%p", label, cluster_id, attr_id, attr->type, attr->data_p);
+        break;
+    }
+}
+
+static void enable_measurement_attr_reporting(uint16_t cluster_id, uint16_t attr_id)
+{
+    esp_zb_zcl_attr_t *attr = esp_zb_zcl_get_attribute(SENSOR_ENDPOINT, cluster_id, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, attr_id);
+    if (!attr) {
+        ESP_LOGW(TAG, "Cannot enable reporting: cluster=0x%04x attr=0x%04x not found", cluster_id, attr_id);
+        return;
+    }
+
+    uint8_t old_access = attr->access;
+    attr->access |= ESP_ZB_ZCL_ATTR_ACCESS_REPORTING;
+    ESP_LOGI(TAG, "Reporting enabled: cluster=0x%04x attr=0x%04x access 0x%02x -> 0x%02x", cluster_id, attr_id, old_access, attr->access);
+}
+
+static void migrate_zigbee_storage_if_needed(void)
+{
+    const char *namespace_name = "app_meta";
+    const char *key_name = "zb_schema";
+    nvs_handle_t nvs_handle;
+    uint32_t stored_schema_version = 0;
+
+    esp_err_t err = nvs_open(namespace_name, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to open NVS namespace for schema migration: %s", esp_err_to_name(err));
+        return;
+    }
+
+    err = nvs_get_u32(nvs_handle, key_name, &stored_schema_version);
+    if (err == ESP_ERR_NVS_NOT_FOUND || stored_schema_version != ZIGBEE_SCHEMA_VERSION) {
+        ESP_LOGW(TAG, "Zigbee schema changed (%lu -> %d), clearing persisted Zigbee state", stored_schema_version, ZIGBEE_SCHEMA_VERSION);
+        ESP_ERROR_CHECK(erase_data_partition("zb_storage"));
+        ESP_ERROR_CHECK(erase_data_partition("zb_fct"));
+        ESP_ERROR_CHECK(nvs_set_u32(nvs_handle, key_name, ZIGBEE_SCHEMA_VERSION));
+        ESP_ERROR_CHECK(nvs_commit(nvs_handle));
+    } else if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to read Zigbee schema version: %s", esp_err_to_name(err));
+    }
+
+    nvs_close(nvs_handle);
+}
 
 #if !defined CONFIG_ZB_ZCZR
 #error Define ZB_ZCZR in idf.py menuconfig to compile light (Router) source code.
@@ -284,24 +364,6 @@ static void bdb_start_top_level_commissioning_cb(uint8_t mode_mask)
     ESP_ERROR_CHECK(esp_zb_bdb_start_top_level_commissioning(mode_mask));
 }
 
-/* Manual reporting atribute to coordinator */
-static void reportAttribute(uint8_t endpoint, uint16_t clusterID, uint16_t attributeID, void *value, uint8_t value_length)
-{
-    esp_zb_zcl_report_attr_cmd_t cmd = {
-        .zcl_basic_cmd = {
-            .dst_addr_u.addr_short = 0x0000,
-            .dst_endpoint = endpoint,
-            .src_endpoint = endpoint,
-        },
-        .address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
-        .clusterID = clusterID,
-        .attributeID = attributeID,
-    };
-    esp_zb_zcl_attr_t *value_r = esp_zb_zcl_get_attribute(endpoint, clusterID, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, attributeID);
-    memcpy(value_r->data_p, value, value_length);
-    esp_zb_zcl_report_attr_cmd_req(&cmd);
-}
-
 /* Task for update attribute value */
 void update_attribute()
 {
@@ -317,6 +379,10 @@ void update_attribute()
             {
                 ESP_LOGE(TAG, "Setting temperature attribute failed: %d", state_tmp);
             }
+            else
+            {
+                log_measurement_attr_state("Temperature after set", ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT, ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID);
+            }
             
             vTaskDelay(100 / portTICK_PERIOD_MS);
             
@@ -324,6 +390,10 @@ void update_attribute()
             if(state_hum != ESP_ZB_ZCL_STATUS_SUCCESS)
             {
                 ESP_LOGE(TAG, "Setting humidity attribute failed: %d", state_hum);
+            }
+            else
+            {
+                log_measurement_attr_state("Humidity after set", ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID);
             }
 
             vTaskDelay(100 / portTICK_PERIOD_MS);
@@ -333,21 +403,29 @@ void update_attribute()
             {
                 ESP_LOGE(TAG, "Setting pressure attribute failed: %d", state_press);
             }
+            else
+            {
+                log_measurement_attr_state("Pressure after set", ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT, ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_ID);
+            }
             
             if (CO2_value > 0 && CO2_value < 10000)
             {
-                // Update CO2 attribute safely - value range check prevents assertion
+                co2_measured_value = (float)CO2_value / 1000000.0f;
                 esp_zb_zcl_status_t state_co2 = esp_zb_zcl_set_attribute_val(
                     SENSOR_ENDPOINT, 
-                    CO2_CUSTOM_CLUSTER, 
+                    ESP_ZB_ZCL_CLUSTER_ID_CARBON_DIOXIDE_MEASUREMENT,
                     ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, 
-                    0x0000, 
-                    &CO2_value, 
+                    ESP_ZB_ZCL_ATTR_CARBON_DIOXIDE_MEASUREMENT_MEASURED_VALUE_ID,
+                    &co2_measured_value,
                     false
                 );
                 if(state_co2 != ESP_ZB_ZCL_STATUS_SUCCESS)
                 {
                     ESP_LOGW(TAG, "CO2 attribute update: %d", state_co2);
+                }
+                else
+                {
+                    log_measurement_attr_state("CO2 after set", ESP_ZB_ZCL_CLUSTER_ID_CARBON_DIOXIDE_MEASUREMENT, ESP_ZB_ZCL_ATTR_CARBON_DIOXIDE_MEASUREMENT_MEASURED_VALUE_ID);
                 }
             }
         }
@@ -399,6 +477,22 @@ static esp_err_t zb_read_attr_resp_handler(const esp_zb_zcl_cmd_read_attr_resp_m
     return ESP_OK;
 }
 
+static esp_err_t zb_report_attr_handler(const esp_zb_zcl_report_attr_message_t *message)
+{
+    ESP_RETURN_ON_FALSE(message, ESP_FAIL, TAG, "Empty report message");
+    ESP_LOGI(TAG, "Report attr callback: status=%d src_ep=%d dst_ep=%d cluster=0x%04x attr=0x%04x type=0x%02x", message->status,
+             message->src_endpoint, message->dst_endpoint, message->cluster, message->attribute.id, message->attribute.data.type);
+    return ESP_OK;
+}
+
+static esp_err_t zb_default_resp_handler(const esp_zb_zcl_cmd_default_resp_message_t *message)
+{
+    ESP_RETURN_ON_FALSE(message, ESP_FAIL, TAG, "Empty default response message");
+    ESP_LOGI(TAG, "Default response: status=%d cluster=0x%04x src_ep=%d dst_ep=%d resp_to_cmd=0x%02x", message->status_code,
+             message->info.cluster, message->info.src_endpoint, message->info.dst_endpoint, message->resp_to_cmd);
+    return ESP_OK;
+}
+
 static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message)
 {
     esp_err_t ret = ESP_OK;
@@ -408,6 +502,12 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
         break;
     case ESP_ZB_CORE_CMD_READ_ATTR_RESP_CB_ID:
         ret = zb_read_attr_resp_handler((esp_zb_zcl_cmd_read_attr_resp_message_t *)message);
+        break;
+    case ESP_ZB_CORE_REPORT_ATTR_CB_ID:
+        ret = zb_report_attr_handler((esp_zb_zcl_report_attr_message_t *)message);
+        break;
+    case ESP_ZB_CORE_CMD_DEFAULT_RESP_CB_ID:
+        ret = zb_default_resp_handler((esp_zb_zcl_cmd_default_resp_message_t *)message);
         break;
     default:
         ESP_LOGW(TAG, "Receive Zigbee action(0x%x) callback", callback_id);
@@ -482,8 +582,7 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_cfg_t zb_nwk_cfg = ESP_ZB_ZR_CONFIG();
     esp_zb_init(&zb_nwk_cfg);
 
-    static uint16_t undefined_value = 0x8000;
-   /* basic cluster create with fully customized */
+    /* basic cluster create with fully customized */
     set_zcl_string(manufacturer, MANUFACTURER_NAME);
     set_zcl_string(model, MODEL_NAME);
     set_zcl_string(firmware_version, FIRMWARE_VERSION);
@@ -500,34 +599,39 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_identify_cluster_add_attr(esp_zb_identify_cluster, ESP_ZB_ZCL_CMD_IDENTIFY_IDENTIFY_ID, &identyfi_id);
 
     /* Temperature cluster */
-    esp_zb_attribute_list_t *esp_zb_temperature_meas_cluster = esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT);
-    esp_zb_temperature_meas_cluster_add_attr(esp_zb_temperature_meas_cluster, ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID, &undefined_value);
-    esp_zb_temperature_meas_cluster_add_attr(esp_zb_temperature_meas_cluster, ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_MIN_VALUE_ID, &undefined_value);
-    esp_zb_temperature_meas_cluster_add_attr(esp_zb_temperature_meas_cluster, ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_MAX_VALUE_ID, &undefined_value);
+    static esp_zb_temperature_meas_cluster_cfg_t temperature_cluster_cfg = {
+        .measured_value = ESP_ZB_ZCL_TEMP_MEASUREMENT_MEASURED_VALUE_DEFAULT,
+        .min_value = ESP_ZB_ZCL_TEMP_MEASUREMENT_MIN_MEASURED_VALUE_DEFAULT,
+        .max_value = ESP_ZB_ZCL_TEMP_MEASUREMENT_MAX_MEASURED_VALUE_DEFAULT,
+    };
+    esp_zb_attribute_list_t *esp_zb_temperature_meas_cluster = esp_zb_temperature_meas_cluster_create(&temperature_cluster_cfg);
 
     /* Humidity cluster */
-    static uint16_t humidity_value = 5000;
-    static uint16_t humidity_min = 0;
-    static uint16_t humidity_max = 10000;
-    esp_zb_attribute_list_t *esp_zb_humidity_meas_cluster = esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT);
-    esp_zb_humidity_meas_cluster_add_attr(esp_zb_humidity_meas_cluster, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID, &humidity_value);
-    esp_zb_humidity_meas_cluster_add_attr(esp_zb_humidity_meas_cluster, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_MIN_VALUE_ID, &humidity_min);
-    esp_zb_humidity_meas_cluster_add_attr(esp_zb_humidity_meas_cluster, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_MAX_VALUE_ID, &humidity_max);
+    static esp_zb_humidity_meas_cluster_cfg_t humidity_cluster_cfg = {
+        .measured_value = ESP_ZB_ZCL_REL_HUMIDITY_MEASUREMENT_MEASURED_VALUE_DEFAULT,
+        .min_value = ESP_ZB_ZCL_REL_HUMIDITY_MEASUREMENT_MIN_MEASURED_VALUE_DEFAULT,
+        .max_value = ESP_ZB_ZCL_REL_HUMIDITY_MEASUREMENT_MAX_MEASURED_VALUE_DEFAULT,
+    };
+    esp_zb_attribute_list_t *esp_zb_humidity_meas_cluster = esp_zb_humidity_meas_cluster_create(&humidity_cluster_cfg);
 
     /* Presure cluster */
-    esp_zb_attribute_list_t *esp_zb_press_meas_cluster = esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT);
-    esp_zb_pressure_meas_cluster_add_attr(esp_zb_press_meas_cluster, ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_ID, &undefined_value);
-    esp_zb_pressure_meas_cluster_add_attr(esp_zb_press_meas_cluster, ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_MIN_VALUE_ID, &undefined_value);
-    esp_zb_pressure_meas_cluster_add_attr(esp_zb_press_meas_cluster, ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_MAX_VALUE_ID, &undefined_value);
+    static esp_zb_pressure_meas_cluster_cfg_t pressure_cluster_cfg = {
+        .measured_value = ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_DEFAULT_VALUE,
+        .min_value = ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_MIN_VALUE_DEFAULT_VALUE,
+        .max_value = ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_MAX_VALUE_DEFAULT_VALUE,
+    };
+    esp_zb_attribute_list_t *esp_zb_press_meas_cluster = esp_zb_pressure_meas_cluster_create(&pressure_cluster_cfg);
 
     /* Time cluster */
     esp_zb_attribute_list_t *esp_zb_server_time_cluster = esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_TIME);
     
-    /* CO2 cluster - custom cluster for CO2 measurement */
-    static uint16_t co2_attr_value = 0;
-    esp_zb_attribute_list_t *custom_co2_attributes_list = esp_zb_zcl_attr_list_create(CO2_CUSTOM_CLUSTER);
-    esp_zb_custom_cluster_add_custom_attr(custom_co2_attributes_list, 0x0000, ESP_ZB_ZCL_ATTR_TYPE_U16, 
-        ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY, &co2_attr_value);
+    /* CO2 cluster */
+    static esp_zb_carbon_dioxide_measurement_cluster_cfg_t co2_cluster_cfg = {
+        .measured_value = ESP_ZB_ZCL_CARBON_DIOXIDE_MEASUREMENT_MEASURED_VALUE_DEFAULT,
+        .min_measured_value = 0.0f,
+        .max_measured_value = 0.01f,
+    };
+    esp_zb_attribute_list_t *esp_zb_co2_meas_cluster = esp_zb_carbon_dioxide_measurement_cluster_create(&co2_cluster_cfg);
 
     /** Create ota client cluster with attributes.
      *  Manufacturer code, image type and file version should match with configured values for server.
@@ -556,7 +660,7 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_cluster_list_add_humidity_meas_cluster(esp_zb_cluster_list, esp_zb_humidity_meas_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     esp_zb_cluster_list_add_pressure_meas_cluster(esp_zb_cluster_list, esp_zb_press_meas_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     esp_zb_cluster_list_add_time_cluster(esp_zb_cluster_list, esp_zb_server_time_cluster, ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
-    esp_zb_cluster_list_add_custom_cluster(esp_zb_cluster_list, custom_co2_attributes_list, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    esp_zb_cluster_list_add_carbon_dioxide_measurement_cluster(esp_zb_cluster_list, esp_zb_co2_meas_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     esp_zb_cluster_list_add_ota_cluster(esp_zb_cluster_list, esp_zb_ota_client_cluster, ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
 
     esp_zb_ep_list_t *esp_zb_ep_list = esp_zb_ep_list_create();
@@ -570,6 +674,10 @@ static void esp_zb_task(void *pvParameters)
 
     /* END */
     esp_zb_device_register(esp_zb_ep_list);
+    enable_measurement_attr_reporting(ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT, ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID);
+    enable_measurement_attr_reporting(ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID);
+    enable_measurement_attr_reporting(ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT, ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_ID);
+    enable_measurement_attr_reporting(ESP_ZB_ZCL_CLUSTER_ID_CARBON_DIOXIDE_MEASUREMENT, ESP_ZB_ZCL_ATTR_CARBON_DIOXIDE_MEASUREMENT_MEASURED_VALUE_ID);
     esp_zb_core_action_handler_register(zb_action_handler);
     esp_zb_set_primary_network_channel_set(ESP_ZB_PRIMARY_CHANNEL_MASK);
     ESP_ERROR_CHECK(esp_zb_start(true));
@@ -685,6 +793,7 @@ void app_main(void)
         .host_config = ESP_ZB_DEFAULT_HOST_CONFIG(),
     };
     ESP_ERROR_CHECK(nvs_flash_init());
+    migrate_zigbee_storage_if_needed();
     ESP_ERROR_CHECK(esp_zb_platform_config(&config));
     if (!DEMO_MODE)
     {

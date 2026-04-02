@@ -4,7 +4,6 @@
 #define MAX_CHILDREN                    10                                    /* the max amount of connected devices */
 #define INSTALLCODE_POLICY_ENABLE       false                                 /* enable the install code policy for security */
 #define SENSOR_ENDPOINT                 1
-#define CO2_CUSTOM_CLUSTER              0xFFF2  /* Custom cluster for CO2 */
 #define ESP_ZB_PRIMARY_CHANNEL_MASK     ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK  /* Zigbee primary channel mask use in the example */
 #define OTA_UPGRADE_MANUFACTURER        0x1001                                /* The attribute indicates the file version of the downloaded image on the device*/
 #define OTA_UPGRADE_IMAGE_TYPE          0x1011                                /* The attribute indicates the value for the manufacturer of the device */
@@ -14,6 +13,7 @@
 #define MANUFACTURER_NAME               "erikfrish"
 #define MODEL_NAME                      "Air Sensor 1.0"
 #define FIRMWARE_VERSION                "ver-0.1"
+#define ZIGBEE_SCHEMA_VERSION           2
 #define SDA_IO_NUM                      GPIO_NUM_22                           /* GPIO number used for I2C data */
 #define SCL_IO_NUM                      GPIO_NUM_23                           /* GPIO number used for I2C clock */
 
