@@ -1,4 +1,26 @@
 menu "BMX280 Options"
+    choice I2C_DRIVER_SETTING
+        prompt "I2C driver setting"
+        help
+            Select I2C Driver: I2C Legacy Driver: I2C.h , I2C Master Driver i2c_master.h for ESP-IDF >= 5.3 AND Set I2C Clock Speed.
+        default USE_I2C_LEGACY_DRIVER
+        config USE_I2C_LEGACY_DRIVER
+            bool "I2C Legacy Driver (I2C.h)"
+            help
+                Use I2C Legacy Driver (I2C.h).
+        config USE_I2C_MASTER_DRIVER
+            bool "I2C Master Driver (i2c_master.h)"
+            help
+                Use I2C Master Driver (i2c_master.h) for ESP-IDF >= 5.3.
+    endchoice
+    
+    config BMX280_I2C_CLK_SPEED_HZ
+        int "I2C Clock Speed (Hz)"
+        default 100000
+        range 1000 400000
+        help
+            Set the I2C clock speed in Hz. Only applies to the new I2C Master driver.
+    
     choice BMX280_EXPECT_DEVICE
         prompt "Installed Sensor Model"
         help
@@ -20,15 +42,15 @@ menu "BMX280 Options"
         default BMX280_ADDRESS_DETECT
         config BMX280_ADDRESS_DETECT
             bool "Auto"
-        config BMX280_ADDERSS_LO
+        config BMX280_ADDRESS_LO
             bool "0x76 (SDO LOW)"
-        config BMX280_ADDERSS_HI
+        config BMX280_ADDRESS_HI
             bool "0x77 (SDO HIGH)"
     endchoice
 
     config BMX280_TIMEOUT
         int "Read/Write Timeout"
-        default 5
+        default 50
         help
             Number of ticks to wait for I2C read/write operations.
 

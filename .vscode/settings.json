@@ -1,11 +1,24 @@
 {
-    "idf.adapterTargetName": "esp32c6",
-    "idf.portWin": "COM7",
-    "idf.flashType": "UART",
-    "files.associations": {
-        "esp_zigbee_zcl_common.h": "c"
-    },
-    "idf.openOcdConfigs": [
-        "board/esp32c6-ftdi.cfg"
-    ]
+  "idf.adapterTargetName": "esp32c6",
+  "idf.portWin": "COM7",
+  "idf.flashType": "UART",
+  "files.associations": {
+    "*.dbclient-js": "javascript",
+    "*.sql": "sql",
+    "esp_zigbee_zcl_common.h": "c",
+    "esp_zigbee_ha_standard.h": "c",
+    "i2c_master.h": "c",
+    "freertos.h": "c"
+  },
+  "idf.openOcdConfigs": [
+    "board/esp32c6-ftdi.cfg"
+  ],
+  "idf.monitorPort": "/dev/ttyACM0",
+  "idf.port": "/dev/ttyACM0",
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32c6"
+  },
+  "idf.espIdfPath": "/home/erikfrish/esp/esp-idf",
+  "idf.toolsPath": "/home/erikfrish/.espressif",
+  "idf.pythonInstallPath": "/usr/bin/python"
 }
