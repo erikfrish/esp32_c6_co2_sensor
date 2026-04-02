@@ -12,8 +12,8 @@ char FWreq[] = {0xFE, 0x04, 0x00, 0x1C, 0x00, 0x01, 0xE4, 0x03};    // Readout F
 char ID_Hi[] = {0xFE, 0x04, 0x00, 0x1D, 0x00, 0x01, 0xB5, 0xC3};    // Sensor ID hi    
 char ID_Lo[] = {0xFE, 0x04, 0x00, 0x1E, 0x00, 0x01, 0x45, 0xC3};    // Sensor ID lo    // in Hex 071dbfe4
 
-#define TXD_PIN (GPIO_NUM_1)
-#define RXD_PIN (GPIO_NUM_2)
+#define TXD_PIN (GPIO_NUM_16)
+#define RXD_PIN (GPIO_NUM_17)
 
 void uart_init(void) {
     const uart_config_t uart_config = {
@@ -103,35 +103,40 @@ void sensair_get_info()
 
 void sensair_tx_task()
 {
-    static const char *TX_TASK_TAG = "Transfer_TASK";
-    esp_log_level_set(TX_TASK_TAG, ESP_LOG_INFO);
+    static const char *TAG = "Sensair S8";
+    ESP_LOGI(TAG, "Task started");
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
+    
+    uint8_t buffer[32];
+    
     while (1) {
-        send_Req(CO2req, 8);
+        uart_flush_input(UART_NUM_1);
+        uart_write_bytes(UART_NUM_1, CO2req, 8);
+        
+        vTaskDelay(200 / portTICK_PERIOD_MS);
+        
+        int rxBytes = uart_read_bytes(UART_NUM_1, buffer, 32, 500 / portTICK_PERIOD_MS);
+        
+        if (rxBytes >= 7) {
+            for (int i = 0; i <= rxBytes - 7; i++) {
+                if (buffer[i] == 0xFE && buffer[i+1] == 0x04) {
+                    ReadCRC = (uint16_t)buffer[i+6] * 256 + (uint16_t)buffer[i+5];
+                    DataCRC = ModBus_CRC(&buffer[i], 5);
+                    
+                    if (DataCRC == ReadCRC) {
+                        CO2_value = buffer[i+3] * 256 + buffer[i+4];
+                        ESP_LOGI(TAG, "CO2 = %d ppm", CO2_value);
+                        break;
+                    }
+                }
+            }
+        }
+        
         vTaskDelay(5000 / portTICK_PERIOD_MS);
     }
 }
 
 void sensair_rx_task()
 {
-    static const char *RX_TASK_TAG = "Sensair S8";
-    esp_log_level_set(RX_TASK_TAG, ESP_LOG_INFO);
-    // Configure a temporary buffer for the incoming data
-    uint8_t* vResponse = (uint8_t*) malloc(RX_BUF_SIZE+1);
-    while (1) {
-        // Read data from the UART
-        const int rxBytes = uart_read_bytes(UART_NUM_1, vResponse, RX_BUF_SIZE, 1000 / portTICK_PERIOD_MS);
-        if (rxBytes > 0) {
-            vResponse[rxBytes] = 0;
-            ReadCRC = (uint16_t)vResponse[6] * 256 + (uint16_t)vResponse[5];
-            DataCRC = ModBus_CRC(vResponse, 5);
-            if (DataCRC == ReadCRC) {
-                CO2_value = vResponse[3] * 256 + vResponse[4] ;
-                ESP_LOGI(RX_TASK_TAG, "CO2 %d ", CO2_value);
-            } else 
-            {
-                ESP_LOGI(RX_TASK_TAG, "CRC-Fehler %ld ungleich %ld", ReadCRC, DataCRC);
-            }
-        }
-    }
-    free(vResponse);
+    vTaskDelete(NULL);
 }

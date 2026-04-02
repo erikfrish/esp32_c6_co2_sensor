@@ -22,11 +22,13 @@
 
 /*------ Global definitions -----------*/
 static char manufacturer[16], model[16], firmware_version[16];
-bool time_updated = false, connected = false, DEMO_MODE = false; /*< DEMO_MDE disable all real sensors and send fake data*/
+bool time_updated = false, connected = false, DEMO_MODE = false; /*< DEMO_MODE disable all real sensors and send fake data*/
 int lcd_timeout = 30;
 uint8_t screen_number = 0; 
 uint16_t temperature = 0, humidity = 0, pressure = 0, CO2_value = 0;
 float temp = 0, pres = 0, hum = 0;
+bool data_ready = false;
+bool lcd_on = true;
 char strftime_buf[64];
 static ssd1306_handle_t ssd1306_dev = NULL;
 SemaphoreHandle_t i2c_semaphore = NULL;
@@ -96,7 +98,7 @@ esp_err_t i2c_master_init()
 		.scl_io_num = SCL_IO_NUM,
 		.sda_pullup_en = GPIO_PULLUP_ENABLE,
 		.scl_pullup_en = GPIO_PULLUP_ENABLE,
-		.master.clk_speed = 1000000
+		.master.clk_speed = 400000
 	};
 
 	esp_err_t ret;
@@ -139,42 +141,46 @@ static void lcd_task(void *pvParameters)
 	
 	while (1)
 	{	
+        if (!lcd_on) {
+            ssd1306_clear_screen(ssd1306_dev, 0x00);
+            ssd1306_refresh_gram(ssd1306_dev);
+            vTaskDelay(1000 / portTICK_PERIOD_MS);
+            continue;
+        }
+        
         switch (screen_number) {
         case 0:
             ESP_LOGI(TAG, "Screen number 0 ");
-            if (CO2_value != 0)
-            {
-                ESP_LOGI("LCD", "data updating");
-                ssd1306_refresh_gram(ssd1306_dev);
-                ssd1306_clear_screen(ssd1306_dev, 0x00);
-                char co2_data_str[16] = {0};
-                char temp_data_str[16] = {0};
-                char pres_data_str[16] = {0};
-                char hum_data_str[16] = {0};
+            ssd1306_refresh_gram(ssd1306_dev);
+            ssd1306_clear_screen(ssd1306_dev, 0x00);
+            char co2_data_str[16] = {0};
+            char temp_data_str[16] = {0};
+            char pres_data_str[16] = {0};
+            char hum_data_str[16] = {0};
+            
+            if (CO2_value != 0) {
                 sprintf(co2_data_str, "CO2 : %d", CO2_value);
-                sprintf(temp_data_str, "Temp: %.2f", temp);
-                sprintf(pres_data_str, "Pres: %.1f", pres/100);
-                sprintf(hum_data_str, "Hum : %.1f", hum);
-                ssd1306_draw_string(ssd1306_dev, 5, 0, (const uint8_t *)co2_data_str, 16, 1);
-                ssd1306_draw_string(ssd1306_dev, 5, 16, (const uint8_t *)temp_data_str, 16, 1);
-                ssd1306_draw_string(ssd1306_dev, 5, 32, (const uint8_t *)pres_data_str, 16, 1);
-                ssd1306_draw_string(ssd1306_dev, 5, 48, (const uint8_t *)hum_data_str, 16, 1);
-                ssd1306_draw_bitmap(ssd1306_dev, 112, 48, zigbee_image, 16, 16);
-                if (connected)
-                {
-                    ssd1306_draw_bitmap(ssd1306_dev, 112, 0, zigbee_connected, 16, 16);
-                }
-                else
-                {
-                    ssd1306_draw_bitmap(ssd1306_dev, 112, 0, zigbee_disconnected, 16, 16);
-                }
-                ssd1306_refresh_gram(ssd1306_dev);
-                
+            } else {
+                sprintf(co2_data_str, "CO2 : ---");
+            }
+            
+            sprintf(temp_data_str, "Temp: %.2f", temp);
+            sprintf(pres_data_str, "Pres: %.1f", pres/100);
+            sprintf(hum_data_str, "Hum : %.1f", hum);
+            ssd1306_draw_string(ssd1306_dev, 5, 0, (const uint8_t *)co2_data_str, 16, 1);
+            ssd1306_draw_string(ssd1306_dev, 5, 16, (const uint8_t *)temp_data_str, 16, 1);
+            ssd1306_draw_string(ssd1306_dev, 5, 32, (const uint8_t *)pres_data_str, 16, 1);
+            ssd1306_draw_string(ssd1306_dev, 5, 48, (const uint8_t *)hum_data_str, 16, 1);
+            ssd1306_draw_bitmap(ssd1306_dev, 112, 48, zigbee_image, 16, 16);
+            if (connected)
+            {
+                ssd1306_draw_bitmap(ssd1306_dev, 112, 0, zigbee_connected, 16, 16);
             }
             else
             {
-                ESP_LOGI("LCD", "Waiting data");
+                ssd1306_draw_bitmap(ssd1306_dev, 112, 0, zigbee_disconnected, 16, 16);
             }
+            ssd1306_refresh_gram(ssd1306_dev);
             break;
         case 1:
             ESP_LOGI(TAG, "Screen number 1 ");
@@ -219,17 +225,7 @@ static void lcd_task(void *pvParameters)
             ESP_LOGW(TAG, "Default screen --------");
             break;	
         }
-        lcd_timeout = lcd_timeout - 1;
-        if (lcd_timeout <= 0) 
-        {
-            screen_number = 2;
-        }
-        else
-        {
-            lcd_timeout = lcd_timeout - 1;
-            ESP_LOGI(TAG, "lcd_timeout %d ", lcd_timeout);
-        }
-		vTaskDelay(1000 / portTICK_PERIOD_MS);
+ 		vTaskDelay(1000 / portTICK_PERIOD_MS);
 	}
 }
 
@@ -257,6 +253,7 @@ static void bmx280_task(void *pvParameters)
         temperature = (uint16_t)(temp * 100);
         humidity = (uint16_t)(hum * 100);
         pressure = (uint16_t)(pres/100);
+        data_ready = true;
     }
 }
 
@@ -308,50 +305,50 @@ static void reportAttribute(uint8_t endpoint, uint16_t clusterID, uint16_t attri
 /* Task for update attribute value */
 void update_attribute()
 {
+    vTaskDelay(5000 / portTICK_PERIOD_MS);
     while(1)
     {
-        if (connected)
+        if (connected && data_ready)
         {
-            /* Write new temperature value */
-            esp_zb_zcl_status_t state_tmp = esp_zb_zcl_set_attribute_val(SENSOR_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID, &temperature, false);
+            ESP_LOGI(TAG, "Updating attributes: temp=%d, hum=%d, press=%d, co2=%d", temperature, humidity, pressure, CO2_value);
             
-            /* Check for error */
+            esp_zb_zcl_status_t state_tmp = esp_zb_zcl_set_attribute_val(SENSOR_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID, &temperature, false);
             if(state_tmp != ESP_ZB_ZCL_STATUS_SUCCESS)
             {
-                ESP_LOGE(TAG, "Setting temperature attribute failed!");
+                ESP_LOGE(TAG, "Setting temperature attribute failed: %d", state_tmp);
             }
             
-            /* Write new humidity value */
-            esp_zb_zcl_status_t state_hum = esp_zb_zcl_set_attribute_val(SENSOR_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID, &humidity, false);
+            vTaskDelay(100 / portTICK_PERIOD_MS);
             
-            /* Check for error */
+            esp_zb_zcl_status_t state_hum = esp_zb_zcl_set_attribute_val(SENSOR_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID, &humidity, false);
             if(state_hum != ESP_ZB_ZCL_STATUS_SUCCESS)
             {
-                ESP_LOGE(TAG, "Setting humidity attribute failed!");
+                ESP_LOGE(TAG, "Setting humidity attribute failed: %d", state_hum);
             }
 
-            /* Write new pressure value */
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+
             esp_zb_zcl_status_t state_press = esp_zb_zcl_set_attribute_val(SENSOR_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_ID, &pressure, false);
-            
-            /* Check for error */
             if(state_press != ESP_ZB_ZCL_STATUS_SUCCESS)
             {
-                ESP_LOGE(TAG, "Setting pressure attribute failed!");
+                ESP_LOGE(TAG, "Setting pressure attribute failed: %d", state_press);
             }
             
-            if (CO2_value != 0)
+            if (CO2_value > 0 && CO2_value < 10000)
             {
-                /* Write new CO2_value value */
-                esp_zb_zcl_status_t state_co2 = esp_zb_zcl_set_attribute_val(SENSOR_ENDPOINT, CO2_CUSTOM_CLUSTER, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, 0, &CO2_value, false);
-                
-                /* Check for error */
+                // Update CO2 attribute safely - value range check prevents assertion
+                esp_zb_zcl_status_t state_co2 = esp_zb_zcl_set_attribute_val(
+                    SENSOR_ENDPOINT, 
+                    CO2_CUSTOM_CLUSTER, 
+                    ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, 
+                    0x0000, 
+                    &CO2_value, 
+                    false
+                );
                 if(state_co2 != ESP_ZB_ZCL_STATUS_SUCCESS)
                 {
-                    ESP_LOGE(TAG, "Setting CO2_value attribute failed!");
+                    ESP_LOGW(TAG, "CO2 attribute update: %d", state_co2);
                 }
-
-                /* CO2 Cluster is custom and we must report it manually*/
-                reportAttribute(SENSOR_ENDPOINT, CO2_CUSTOM_CLUSTER, 0, &CO2_value, 2);
             }
         }
         vTaskDelay(5000 / portTICK_PERIOD_MS);
@@ -485,23 +482,20 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_cfg_t zb_nwk_cfg = ESP_ZB_ZR_CONFIG();
     esp_zb_init(&zb_nwk_cfg);
 
-    uint16_t undefined_value;
-    undefined_value = 0x8000;
+    static uint16_t undefined_value = 0x8000;
    /* basic cluster create with fully customized */
     set_zcl_string(manufacturer, MANUFACTURER_NAME);
     set_zcl_string(model, MODEL_NAME);
     set_zcl_string(firmware_version, FIRMWARE_VERSION);
-    uint8_t dc_power_source;
-    dc_power_source = 4;
+    static uint8_t dc_power_source = 4;
     esp_zb_attribute_list_t *esp_zb_basic_cluster = esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_BASIC);
     esp_zb_basic_cluster_add_attr(esp_zb_basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, manufacturer);
     esp_zb_basic_cluster_add_attr(esp_zb_basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, model);
     esp_zb_basic_cluster_add_attr(esp_zb_basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_SW_BUILD_ID, firmware_version);
-    esp_zb_basic_cluster_add_attr(esp_zb_basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_POWER_SOURCE_ID, &dc_power_source);  /**< DC source. */
+    esp_zb_basic_cluster_add_attr(esp_zb_basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_POWER_SOURCE_ID, &dc_power_source);
 
     /* identify cluster create with fully customized */
-    uint8_t identyfi_id;
-    identyfi_id = 0;
+    static uint8_t identyfi_id = 0;
     esp_zb_attribute_list_t *esp_zb_identify_cluster = esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_IDENTIFY);
     esp_zb_identify_cluster_add_attr(esp_zb_identify_cluster, ESP_ZB_ZCL_CMD_IDENTIFY_IDENTIFY_ID, &identyfi_id);
 
@@ -512,10 +506,13 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_temperature_meas_cluster_add_attr(esp_zb_temperature_meas_cluster, ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_MAX_VALUE_ID, &undefined_value);
 
     /* Humidity cluster */
+    static uint16_t humidity_value = 5000;
+    static uint16_t humidity_min = 0;
+    static uint16_t humidity_max = 10000;
     esp_zb_attribute_list_t *esp_zb_humidity_meas_cluster = esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT);
-    esp_zb_humidity_meas_cluster_add_attr(esp_zb_humidity_meas_cluster, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID, &undefined_value);
-    esp_zb_humidity_meas_cluster_add_attr(esp_zb_humidity_meas_cluster, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_MIN_VALUE_ID, &undefined_value);
-    esp_zb_humidity_meas_cluster_add_attr(esp_zb_humidity_meas_cluster, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_MAX_VALUE_ID, &undefined_value);
+    esp_zb_humidity_meas_cluster_add_attr(esp_zb_humidity_meas_cluster, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID, &humidity_value);
+    esp_zb_humidity_meas_cluster_add_attr(esp_zb_humidity_meas_cluster, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_MIN_VALUE_ID, &humidity_min);
+    esp_zb_humidity_meas_cluster_add_attr(esp_zb_humidity_meas_cluster, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_MAX_VALUE_ID, &humidity_max);
 
     /* Presure cluster */
     esp_zb_attribute_list_t *esp_zb_press_meas_cluster = esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT);
@@ -526,27 +523,25 @@ static void esp_zb_task(void *pvParameters)
     /* Time cluster */
     esp_zb_attribute_list_t *esp_zb_server_time_cluster = esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_TIME);
     
-    /* Custom cluster for CO2 ( standart cluster not working), solution only for HOMEd */
-    const uint16_t attr_id = 0;
-    const uint8_t attr_type = ESP_ZB_ZCL_ATTR_TYPE_U16;
-    const uint8_t attr_access = ESP_ZB_ZCL_ATTR_MANUF_SPEC | ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING;
-
+    /* CO2 cluster - custom cluster for CO2 measurement */
+    static uint16_t co2_attr_value = 0;
     esp_zb_attribute_list_t *custom_co2_attributes_list = esp_zb_zcl_attr_list_create(CO2_CUSTOM_CLUSTER);
-    esp_zb_custom_cluster_add_custom_attr(custom_co2_attributes_list, attr_id, attr_type, attr_access, &undefined_value);
+    esp_zb_custom_cluster_add_custom_attr(custom_co2_attributes_list, 0x0000, ESP_ZB_ZCL_ATTR_TYPE_U16, 
+        ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY, &co2_attr_value);
 
     /** Create ota client cluster with attributes.
      *  Manufacturer code, image type and file version should match with configured values for server.
      *  If the client values do not match with configured values then it shall discard the command and
      *  no further processing shall continue.
      */
-    esp_zb_ota_cluster_cfg_t ota_cluster_cfg = {
+    static esp_zb_ota_cluster_cfg_t ota_cluster_cfg = {
         .ota_upgrade_downloaded_file_ver = OTA_UPGRADE_FILE_VERSION,
         .ota_upgrade_manufacturer = OTA_UPGRADE_MANUFACTURER,
         .ota_upgrade_image_type = OTA_UPGRADE_IMAGE_TYPE,
     };
     esp_zb_attribute_list_t *esp_zb_ota_client_cluster = esp_zb_ota_cluster_create(&ota_cluster_cfg);
     /** add client parameters to ota client cluster */
-    esp_zb_zcl_ota_upgrade_client_variable_t ota_client_parameter_config = {
+    static esp_zb_zcl_ota_upgrade_client_variable_t ota_client_parameter_config = {
         .timer_query = ESP_ZB_ZCL_OTA_UPGRADE_QUERY_TIMER_COUNT_DEF,
         .max_data_size = OTA_UPGRADE_MAX_DATA_SIZE,
         .hw_version = OTA_UPGRADE_HW_VERSION,
@@ -581,12 +576,110 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_main_loop_iteration();
 }
 
+
+void test_ssd1306(void)
+{
+    ESP_LOGI(TAG, "Testing SSD1306 display...");
+    
+    // Инициализация дисплея
+    ssd1306_handle_t dev = ssd1306_create(I2C_NUM_0, SSD1306_I2C_ADDRESS);
+
+    if (dev == NULL) {
+        ESP_LOGE(TAG, "Failed to create SSD1306 device");
+        return;
+    }
+    
+    // Инициализация дисплея
+    ssd1306_init(dev);
+    ssd1306_clear_screen(dev, false);
+    
+    // Вывод текста с помощью правильной функции
+    ssd1306_draw_string(dev, 5, 0, (const uint8_t *)"CO2 Sensor", 16, 1);
+    ssd1306_draw_string(dev, 5, 16, (const uint8_t *)"XIAO ESP32C6", 16, 0);
+    ssd1306_draw_string(dev, 5, 32, (const uint8_t *)"Temp: 25.5C", 16, 0);
+    ssd1306_draw_string(dev, 5, 48, (const uint8_t *)"Hum: 50%", 16, 0);
+    
+    // Обновление дисплея
+    ssd1306_refresh_gram(dev);
+    
+    ESP_LOGI(TAG, "Display test complete");
+}
+
+void test_i2c_scanner() {
+    printf("Scanning I2C bus...\n");
+    for (uint8_t addr = 1; addr < 127; addr++) {
+        i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+        i2c_master_start(cmd);
+        i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
+        i2c_master_stop(cmd);
+        
+        esp_err_t ret = i2c_master_cmd_begin(I2C_NUM_0, cmd, 1000 / portTICK_PERIOD_MS);
+        i2c_cmd_link_delete(cmd);
+        
+        if (ret == ESP_OK) {
+            printf("Found device at: 0x%02X\n", addr);
+        }
+    }
+    printf("Scan complete\n");
+}
+
+
+void test_bme280(void)
+{
+    ESP_LOGI(TAG, "Testing BME280 sensor...");
+    
+    bmx280_t* bmx280 = bmx280_create(I2C_NUM_0);
+    if (!bmx280) {
+        ESP_LOGE(TAG, "Failed to create BME280 device");
+        return;
+    }
+    
+    ESP_ERROR_CHECK(bmx280_init(bmx280));
+    bmx280_config_t bmx_cfg = BMX280_DEFAULT_CONFIG;
+    ESP_ERROR_CHECK(bmx280_configure(bmx280, &bmx_cfg));
+    
+    float temperature, pressure, humidity;
+    ESP_ERROR_CHECK(bmx280_setMode(bmx280, BMX280_MODE_FORCE));
+    do {
+        vTaskDelay(50 / portTICK_PERIOD_MS);
+    } while(bmx280_isSampling(bmx280));
+    
+    ESP_ERROR_CHECK(bmx280_readoutFloat(bmx280, &temperature, &pressure, &humidity));
+    
+    ESP_LOGI(TAG, "BME280 - Temp: %.1f°C, Hum: %.1f%%, Press: %.1fhPa", 
+             temperature, humidity, pressure/100);
+    
+    if (ssd1306_dev) {
+        char buffer[32];
+        ssd1306_clear_screen(ssd1306_dev, 0x00);
+        ssd1306_draw_string(ssd1306_dev, 5, 0, (const uint8_t *)"BME280 Test", 16, 1);
+        
+        snprintf(buffer, sizeof(buffer), "T: %.1f C", temperature);
+        ssd1306_draw_string(ssd1306_dev, 5, 16, (const uint8_t *)buffer, 16, 1);
+        
+        snprintf(buffer, sizeof(buffer), "H: %.1f %%", humidity);
+        ssd1306_draw_string(ssd1306_dev, 5, 32, (const uint8_t *)buffer, 16, 1);
+        
+        snprintf(buffer, sizeof(buffer), "P: %.1f hPa", pressure/100);
+        ssd1306_draw_string(ssd1306_dev, 5, 48, (const uint8_t *)buffer, 16, 1);
+        
+        ssd1306_refresh_gram(ssd1306_dev);
+    }
+
+    bmx280_close(bmx280);
+}
+
 void app_main(void)
 {
 	register_button();
     ESP_ERROR_CHECK(i2c_master_init());
 	uart_init();
-    //sensair_get_info();
+    // test_ssd1306();
+    // test_i2c_scanner();
+    // test_bme280();
+    // test_sensair_s8();
+    // sensair_get_info();
+    // test_bme280();
     esp_zb_platform_config_t config = {
         .radio_config = ESP_ZB_DEFAULT_RADIO_CONFIG(),
         .host_config = ESP_ZB_DEFAULT_HOST_CONFIG(),

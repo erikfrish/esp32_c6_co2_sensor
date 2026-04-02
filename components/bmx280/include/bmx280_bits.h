@@ -57,7 +57,6 @@ typedef enum bmx280_tstby_t {
 
 typedef enum bmx280_iirf_t {
     BMX280_IIR_NONE = 0x0,
-    BMX280_IIR_X1,
     BMX280_IIR_X2,
     BMX280_IIR_X4,
     BMX280_IIR_X8,
@@ -126,7 +125,7 @@ typedef struct bmx280_config_t {
 #elif (CONFIG_BMX280_DEFAULT_STANDBY_10M)
 #define BMX280_DEFAULT_STANDBY BME280_STANDBY_10M
 #else
-#define BMX280_DEFAULT_STANDBY BMX280_STANDBY_20M
+#define BMX280_DEFAULT_STANDBY BME280_STANDBY_20M
 #endif
 
 #if (CONFIG_BMX280_DEFAULT_IIR_NONE)
